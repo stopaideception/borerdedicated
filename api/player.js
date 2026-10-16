@@ -33,13 +33,20 @@ module.exports = async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
 
   if (req.method !== "GET" && req.method !== "PATCH") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return res.status(405).json({
+      error: "Method not allowed"
+    });
   }
 
   const key = req.headers["x-api-key"];
 
-  if (!process.env.SERVER_API_KEY || key !== process.env.SERVER_API_KEY) {
-    return res.status(401).json({ error: "Unauthorized" });
+  if (
+    !process.env.SERVER_API_KEY ||
+    key !== process.env.SERVER_API_KEY
+  ) {
+    return res.status(401).json({
+      error: "Unauthorized"
+    });
   }
 
   const playerId =
@@ -51,7 +58,9 @@ module.exports = async function handler(req, res) {
     typeof playerId !== "string" ||
     !/^[a-zA-Z0-9_-]{1,128}$/.test(playerId)
   ) {
-    return res.status(400).json({ error: "Invalid playerId" });
+    return res.status(400).json({
+      error: "Invalid playerId"
+    });
   }
 
   try {
@@ -61,8 +70,14 @@ module.exports = async function handler(req, res) {
     if (req.method === "PATCH") {
       const body = req.body;
 
-      if (!body || typeof body !== "object" || Array.isArray(body)) {
-        return res.status(400).json({ error: "Invalid JSON" });
+      if (
+        !body ||
+        typeof body !== "object" ||
+        Array.isArray(body)
+      ) {
+        return res.status(400).json({
+          error: "Invalid JSON"
+        });
       }
 
       const fields = [
@@ -77,7 +92,9 @@ module.exports = async function handler(req, res) {
       const changes = {};
 
       for (const field of fields) {
-        if (Object.prototype.hasOwnProperty.call(body, field)) {
+        if (
+          Object.prototype.hasOwnProperty.call(body, field)
+        ) {
           if (!validNumber(body[field])) {
             return res.status(400).json({
               error: `Invalid field: ${field}`
@@ -89,7 +106,9 @@ module.exports = async function handler(req, res) {
       }
 
       if (Object.keys(changes).length === 0) {
-        return res.status(400).json({ error: "No fields" });
+        return res.status(400).json({
+          error: "No fields"
+        });
       }
 
       const now = Date.now();
@@ -105,11 +124,19 @@ module.exports = async function handler(req, res) {
         };
 
         const oldScore = player.userScore;
-        const updated = { ...player, ...changes };
+
+        const updated = {
+          ...player,
+          ...changes
+        };
 
         if (updated.userScore === 0) {
-          if (oldScore !== 0 || updated.nextRewardAt == null) {
-            updated.nextRewardAt = now + THREE_HOURS;
+          if (
+            oldScore !== 0 ||
+            updated.nextRewardAt == null
+          ) {
+            updated.nextRewardAt =
+              now + THREE_HOURS;
           }
         } else {
           updated.nextRewardAt = null;
@@ -125,7 +152,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // GET — загрузка и начисление награды
+    // GET — загрузка и проверка награды
     if (req.method === "GET") {
       const snapshot = await ref.get();
       const currentPlayer = snapshot.val();
@@ -145,19 +172,42 @@ module.exports = async function handler(req, res) {
         rewardForLevel(currentPlayer.level) !== null;
 
       if (rewardDue) {
+        let transactionReason = "not_started";
+        let transactionCurrent = null;
+
         const result = await ref.transaction(current => {
-          if (!current) return;
+          transactionCurrent = current;
+
+          if (!current) {
+            transactionReason = "current_empty";
+            return;
+          }
+
+          if (current.userScore !== 0) {
+            transactionReason = "score_not_zero";
+            return;
+          }
+
+          if (
+            typeof current.nextRewardAt !== "number"
+          ) {
+            transactionReason = "time_not_number";
+            return;
+          }
+
+          if (Date.now() < current.nextRewardAt) {
+            transactionReason = "time_not_reached";
+            return;
+          }
 
           const reward = rewardForLevel(current.level);
 
-          if (
-            current.userScore !== 0 ||
-            typeof current.nextRewardAt !== "number" ||
-            Date.now() < current.nextRewardAt ||
-            reward === null
-          ) {
+          if (reward === null) {
+            transactionReason = "no_reward_for_level";
             return;
           }
+
+          transactionReason = "reward_applied";
 
           return {
             ...current,
@@ -166,31 +216,30 @@ module.exports = async function handler(req, res) {
           };
         }, undefined, false);
 
-        // Диагностика результата прямо в ответе GET
-        if (!result.committed) {
-          const latest = (await ref.get()).val();
+        const player = (await ref.get()).val();
 
+        if (!result.committed) {
           return res.status(200).json({
             success: true,
             playerId,
             rewardTransactionCommitted: false,
-            ...latest
+            transactionReason,
+            transactionCurrent,
+            ...player
           });
         }
-      }
 
-      const player = (await ref.get()).val();
-
-      if (!player) {
-        return res.status(404).json({
-          error: "Player not found"
+        return res.status(200).json({
+          success: true,
+          playerId,
+          ...player
         });
       }
 
       return res.status(200).json({
         success: true,
         playerId,
-        ...player
+        ...currentPlayer
       });
     }
   } catch (error) {
