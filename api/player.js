@@ -152,7 +152,8 @@ module.exports = async function handler(req, res) {
         }
 
         // Нет изменений — транзакцию не записываем
-        return;
+        // Возвращаем данные игрока
+      return player;
       }, undefined, false);
 
       const player = (await ref.get()).val();
