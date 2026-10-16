@@ -156,7 +156,7 @@ if (req.method === "GET") {
     typeof currentPlayer.nextRewardAt === "number" &&
     now >= currentPlayer.nextRewardAt
   ) {
-    await ref.transaction(current => {
+    const result = await ref.transaction(current => {
       if (!current) return;
 
       if (
