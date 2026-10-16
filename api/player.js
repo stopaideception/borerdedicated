@@ -134,6 +134,15 @@ if (req.method === "GET") {
   const refSnapshot = await ref.get();
   const currentPlayer = refSnapshot.val();
 
+  console.log("REWARD DEBUG", {
+  level: currentPlayer?.level,
+  userScore: currentPlayer?.userScore,
+  nextRewardAt: currentPlayer?.nextRewardAt,
+  scoreType: typeof currentPlayer?.userScore,
+  timeType: typeof currentPlayer?.nextRewardAt,
+  now: Date.now()
+});
+
   if (!currentPlayer) {
     return res.status(404).json({
       error: "Player not found"
