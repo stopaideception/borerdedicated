@@ -20,9 +20,9 @@ function database() {
 }
 
 function rewardForLevel(level) {
-  if (level < 4) return 50;
+  if (level < 4) return 70;
   if (level < 8) return 70;
-  return null; // Для уровней 8+ правило добавим позже
+  return null;
 }
 
 function validNumber(value) {
@@ -36,7 +36,6 @@ module.exports = async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // Только Dedicated Server может обращаться к API
   const key = req.headers["x-api-key"];
 
   if (!process.env.SERVER_API_KEY || key !== process.env.SERVER_API_KEY) {
@@ -58,7 +57,7 @@ module.exports = async function handler(req, res) {
   try {
     const ref = database().ref(`players/${playerId}`);
 
-    // PATCH — сохранение данных от Dedicated Server
+    // PATCH — сохранение данных
     if (req.method === "PATCH") {
       const body = req.body;
 
@@ -113,18 +112,11 @@ module.exports = async function handler(req, res) {
             updated.nextRewardAt = now + THREE_HOURS;
           }
         } else {
-          // Временная политика: положительный PATCH
-          // отменяет ожидание пополнения.
           updated.nextRewardAt = null;
         }
 
         return updated;
       }, undefined, false);
-
-      console.log("TRANSACTION DEBUG", {
-  committed: result.committed,
-  snapshot: result.snapshot.val()
-});
 
       return res.status(200).json({
         success: true,
@@ -133,66 +125,74 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // GET — загрузка и проверка времени
-  
-if (req.method === "GET") {
-  const refSnapshot = await ref.get();
-  const currentPlayer = refSnapshot.val();
+    // GET — загрузка и начисление награды
+    if (req.method === "GET") {
+      const snapshot = await ref.get();
+      const currentPlayer = snapshot.val();
 
-  console.log("REWARD DEBUG", {
-  level: currentPlayer?.level,
-  userScore: currentPlayer?.userScore,
-  nextRewardAt: currentPlayer?.nextRewardAt,
-  scoreType: typeof currentPlayer?.userScore,
-  timeType: typeof currentPlayer?.nextRewardAt,
-  now: Date.now()
-});
-
-  if (!currentPlayer) {
-    return res.status(404).json({
-      error: "Player not found"
-    });
-  }
-
-  const now = Date.now();
-
-  if (
-    currentPlayer.userScore === 0 &&
-    typeof currentPlayer.nextRewardAt === "number" &&
-    now >= currentPlayer.nextRewardAt
-  ) {
-    const result = await ref.transaction(current => {
-      if (!current) return;
-
-      if (
-        current.userScore !== 0 ||
-        typeof current.nextRewardAt !== "number" ||
-        Date.now() < current.nextRewardAt
-      ) {
-        return;
+      if (!currentPlayer) {
+        return res.status(404).json({
+          error: "Player not found"
+        });
       }
 
-      const reward = rewardForLevel(current.level);
+      const now = Date.now();
 
-      if (reward === null) return;
+      const rewardDue =
+        currentPlayer.userScore === 0 &&
+        typeof currentPlayer.nextRewardAt === "number" &&
+        now >= currentPlayer.nextRewardAt &&
+        rewardForLevel(currentPlayer.level) !== null;
 
-      return {
-        ...current,
-        userScore: reward,
-        nextRewardAt: null
-      };
-    }, undefined, false);
-  }
+      if (rewardDue) {
+        const result = await ref.transaction(current => {
+          if (!current) return;
 
-  const player = (await ref.get()).val();
+          const reward = rewardForLevel(current.level);
 
-  return res.status(200).json({
-    success: true,
-    playerId,
-    ...player
-  });
-}
+          if (
+            current.userScore !== 0 ||
+            typeof current.nextRewardAt !== "number" ||
+            Date.now() < current.nextRewardAt ||
+            reward === null
+          ) {
+            return;
+          }
 
+          return {
+            ...current,
+            userScore: reward,
+            nextRewardAt: null
+          };
+        }, undefined, false);
+
+        // Диагностика результата прямо в ответе GET
+        if (!result.committed) {
+          const latest = (await ref.get()).val();
+
+          return res.status(200).json({
+            success: true,
+            playerId,
+            rewardTransactionCommitted: false,
+            ...latest
+          });
+        }
+      }
+
+      const player = (await ref.get()).val();
+
+      if (!player) {
+        return res.status(404).json({
+          error: "Player not found"
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        playerId,
+        ...player
+      });
+    }
   } catch (error) {
     console.error("Player API error:", error);
 
