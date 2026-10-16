@@ -1,4 +1,3 @@
-
 const { getApps, initializeApp, cert } = require("firebase-admin/app");
 
 const THREE_HOURS = 3 * 60 * 60 * 1000;
@@ -15,20 +14,17 @@ function firebaseApp() {
       databaseURL: process.env.FIREBASE_DATABASE_URL
     });
   }
-
   return getApps()[0];
 }
 
 const REWARD_TIERS = [
-  { maxRank: 4,  reward: 50  }, // ранги 1-4:   простая кирка, угольный пласт
-  { maxRank: 9,  reward: 70  }, // ранги 5-9:   улучшенная кирка, мраморная пещера
-  { maxRank: 14, reward: 100 }, // ранги 10-14: ручной бур, рудная шахта
-  { maxRank: 19, reward: 150 }, // ранги 15-19: перфоратор, серебряная шахта
-  { maxRank: 24, reward: 200 }, // ранги 20-24: отбойный молоток, золотой рудник
-  { maxRank: 29, reward: 250 }  // ранги 25-29: алмазная буровая, алмазный рудник
+  { maxRank: 4,  reward: 50  },
+  { maxRank: 9,  reward: 70  },
+  { maxRank: 14, reward: 100 },
+  { maxRank: 19, reward: 150 },
+  { maxRank: 24, reward: 200 },
+  { maxRank: 29, reward: 250 }
 ];
-
-// Ранг 30+: пока то же, что у 25-29. Сюрпризы и бонусы добавим позже.
 const MAX_TIER_REWARD = 250;
 
 function rewardForLevel(level) {
@@ -38,8 +34,42 @@ function rewardForLevel(level) {
   return MAX_TIER_REWARD;
 }
 
-function validNumber(value) {
-  return Number.isSafeInteger(value) && value >= 0;
+// Любые имена полей из Blueprint: "User Score", "UserScore", "userScore",
+// "UserScore_3_ABC...GUID" приводятся к нужному полю.
+const FIELD_MAP = {
+  level: "level",
+  loss: "loss",
+  totalwin: "totalWin",
+  userscore: "userScore",
+  win: "win",
+  winrow: "winRow"
+};
+
+function norm(key) {
+  return String(key)
+    .replace(/_\d+_[0-9A-Fa-f]{32}$/, "")
+    .toLowerCase()
+    .replace(/[^a-z]/g, "");
+}
+
+// Число или строка с числом -> целое >= 0, иначе null
+function toInt(v) {
+  const n = typeof v === "string" ? Number(v) : v;
+  if (typeof n !== "number" || !Number.isFinite(n)) return null;
+  return Math.max(0, Math.round(n));
+}
+
+// Отдаём поля и в формате API, и в формате Blueprint
+function withAliases(p) {
+  return {
+    ...p,
+    "Level": p.level,
+    "Loss": p.loss,
+    "Total Win": p.totalWin,
+    "User Score": p.userScore,
+    "Win": p.win,
+    "Win Row": p.winRow
+  };
 }
 
 function defaultPlayer() {
@@ -76,9 +106,7 @@ async function firebaseRequest(playerId, method, data, etag) {
   const response = await fetch(url, {
     method,
     headers,
-    ...(method === "PUT"
-      ? { body: JSON.stringify(data) }
-      : {})
+    ...(method === "PUT" ? { body: JSON.stringify(data) } : {})
   });
 
   if (response.status === 412) {
@@ -87,9 +115,7 @@ async function firebaseRequest(playerId, method, data, etag) {
 
   if (!response.ok) {
     const message = await response.text();
-    throw new Error(
-      `Firebase HTTP ${response.status}: ${message}`
-    );
+    throw new Error(`Firebase HTTP ${response.status}: ${message}`);
   }
 
   return {
@@ -101,10 +127,7 @@ async function firebaseRequest(playerId, method, data, etag) {
 
 async function atomicUpdate(playerId, updater) {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const current = await firebaseRequest(
-      playerId,
-      "GET"
-    );
+    const current = await firebaseRequest(playerId, "GET");
 
     if (!current.etag) {
       throw new Error("Firebase did not return ETag");
@@ -145,184 +168,117 @@ module.exports = async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
 
   if (req.method !== "GET" && req.method !== "PATCH") {
-    return res.status(405).json({
-      error: "Method not allowed"
-    });
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
-  if (
-    !process.env.SERVER_API_KEY ||
-    req.headers["x-api-key"] !== process.env.SERVER_API_KEY
-  ) {
-    return res.status(401).json({
-      error: "Unauthorized"
-    });
+  // Ключ принимается и в заголовке x-api-key, и в адресе ?key=...
+  const apiKey = req.headers["x-api-key"] || req.query.key;
+
+  if (!process.env.SERVER_API_KEY || apiKey !== process.env.SERVER_API_KEY) {
+    return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const playerId =
-    req.method === "GET"
-      ? req.query.playerId
-      : req.body?.playerId;
+  // Тело может прийти строкой или Buffer
+  let body = req.body;
+  if (Buffer.isBuffer(body)) body = body.toString("utf8");
+  if (typeof body === "string") {
+    try { body = JSON.parse(body); } catch { body = null; }
+  }
+
+  // ID из адреса или из тела, хвост ".json" отрезается
+  let playerId = req.query.playerId || (body && body.playerId);
+  if (typeof playerId === "string") {
+    playerId = playerId.replace(/\.json$/, "");
+  }
 
   if (
     typeof playerId !== "string" ||
     !/^[a-zA-Z0-9_-]{1,128}$/.test(playerId)
   ) {
-    return res.status(400).json({
-      error: "Invalid playerId"
-    });
+    return res.status(400).json({ error: "Invalid playerId" });
   }
 
   try {
     // ====================================
     // PATCH — СОХРАНЕНИЕ ДАННЫХ
     // ====================================
-
     if (req.method === "PATCH") {
-      const body = req.body;
-
-      if (
-        !body ||
-        typeof body !== "object" ||
-        Array.isArray(body)
-      ) {
-        return res.status(400).json({
-          error: "Invalid JSON"
-        });
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return res.status(400).json({ error: "Invalid JSON" });
       }
 
-      const fields = [
-        "level",
-        "loss",
-        "totalWin",
-        "userScore",
-        "win",
-        "winRow"
-      ];
-
       const changes = {};
-
-      for (const field of fields) {
-        if (
-          Object.prototype.hasOwnProperty.call(body, field)
-        ) {
-          if (!validNumber(body[field])) {
-            return res.status(400).json({
-              error: `Invalid field: ${field}`
-            });
-          }
-
-          changes[field] = body[field];
-        }
+      for (const [k, v] of Object.entries(body)) {
+        const field = FIELD_MAP[norm(k)];
+        if (!field) continue;
+        const n = toInt(v);
+        if (n !== null) changes[field] = n;
       }
 
       if (Object.keys(changes).length === 0) {
-        return res.status(400).json({
-          error: "No fields"
-        });
+        return res.status(400).json({ error: "No fields" });
       }
 
-      const result = await atomicUpdate(
-        playerId,
-        current => {
-          const player = current || defaultPlayer();
-          const oldScore = player.userScore;
+      const result = await atomicUpdate(playerId, current => {
+        const player = current || defaultPlayer();
+        const oldScore = player.userScore;
 
-          const updated = {
-            ...player,
-            ...changes
-          };
+        const updated = { ...player, ...changes };
 
-          if (updated.userScore === 0) {
-            if (
-              oldScore !== 0 ||
-              updated.nextRewardAt == null
-            ) {
-              updated.nextRewardAt =
-                Date.now() + THREE_HOURS;
-            }
-          } else {
-            updated.nextRewardAt = null;
+        if (updated.userScore === 0) {
+          if (oldScore !== 0 || updated.nextRewardAt == null) {
+            updated.nextRewardAt = Date.now() + THREE_HOURS;
           }
-
-          return {
-            write: true,
-            reason: "saved",
-            player: updated
-          };
+        } else {
+          updated.nextRewardAt = null;
         }
-      );
+
+        return { write: true, reason: "saved", player: updated };
+      });
 
       return res.status(200).json({
         success: true,
         playerId,
-        ...result.player
+        ...withAliases(result.player)
       });
     }
 
     // ====================================
     // GET — ЗАГРУЗКА И НАГРАДА
     // ====================================
-
     if (req.method === "GET") {
-      const result = await atomicUpdate(
-        playerId,
-        current => {
-          if (current === null) {
-            return {
-              write: false,
-              reason: "player_not_found"
-            };
-          }
-
-          if (current.userScore !== 0) {
-            return {
-              write: false,
-              reason: "score_not_zero"
-            };
-          }
-
-          if (
-            typeof current.nextRewardAt !== "number"
-          ) {
-            return {
-              write: false,
-              reason: "no_reward_time"
-            };
-          }
-
-          if (Date.now() < current.nextRewardAt) {
-            return {
-              write: false,
-              reason: "waiting"
-            };
-          }
-
-          const reward = rewardForLevel(current.level);
-
-          if (reward === null) {
-            return {
-              write: false,
-              reason: "no_reward_for_level"
-            };
-          }
-
-          return {
-            write: true,
-            reason: "reward_applied",
-            player: {
-              ...current,
-              userScore: reward,
-              nextRewardAt: null
-            }
-          };
+      const result = await atomicUpdate(playerId, current => {
+        if (current === null) {
+          return { write: false, reason: "player_not_found" };
         }
-      );
 
+        if (current.userScore !== 0) {
+          return { write: false, reason: "score_not_zero" };
+        }
+
+        if (typeof current.nextRewardAt !== "number") {
+          return { write: false, reason: "no_reward_time" };
+        }
+
+        if (Date.now() < current.nextRewardAt) {
+          return { write: false, reason: "waiting" };
+        }
+
+        return {
+          write: true,
+          reason: "reward_applied",
+          player: {
+            ...current,
+            userScore: rewardForLevel(current.level),
+            nextRewardAt: null
+          }
+        };
+      });
+
+      // Игрока нет: отвечаем null с кодом 200, как раньше отвечал Firebase
       if (result.player === null) {
-        return res.status(404).json({
-          error: "Player not found"
-        });
+        res.setHeader("Content-Type", "application/json");
+        return res.status(200).send("null");
       }
 
       return res.status(200).json({
@@ -330,15 +286,11 @@ module.exports = async function handler(req, res) {
         playerId,
         rewardTransactionCommitted: result.committed,
         transactionReason: result.reason,
-        ...result.player
+        ...withAliases(result.player)
       });
     }
-
   } catch (error) {
     console.error("Player API error:", error);
-
-    return res.status(500).json({
-      error: "Internal server error"
-    });
+    return res.status(500).json({ error: "Internal server error" });
   }
 };
