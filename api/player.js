@@ -74,7 +74,7 @@ function withAliases(p) {
 
 function defaultPlayer() {
   return {
-    level: 0,
+    level: 1,
     loss: 0,
     totalWin: 0,
     userScore: 50,
