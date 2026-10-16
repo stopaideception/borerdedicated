@@ -155,7 +155,7 @@ module.exports = async function handler(req, res) {
         return;
       }, undefined, false);
 
-      const player = result.snapshot.val();
+      const player = (await ref.get()).val();
 
       if (!player) {
         return res.status(404).json({
