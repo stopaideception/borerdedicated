@@ -19,10 +19,23 @@ function firebaseApp() {
   return getApps()[0];
 }
 
+const REWARD_TIERS = [
+  { maxRank: 4,  reward: 50  }, // ранги 1-4:   простая кирка, угольный пласт
+  { maxRank: 9,  reward: 70  }, // ранги 5-9:   улучшенная кирка, мраморная пещера
+  { maxRank: 14, reward: 100 }, // ранги 10-14: ручной бур, рудная шахта
+  { maxRank: 19, reward: 150 }, // ранги 15-19: перфоратор, серебряная шахта
+  { maxRank: 24, reward: 200 }, // ранги 20-24: отбойный молоток, золотой рудник
+  { maxRank: 29, reward: 250 }  // ранги 25-29: алмазная буровая, алмазный рудник
+];
+
+// Ранг 30+: пока то же, что у 25-29. Сюрпризы и бонусы добавим позже.
+const MAX_TIER_REWARD = 250;
+
 function rewardForLevel(level) {
-  if (level < 4) return 50;
-  if (level < 8) return 70;
-  return null;
+  for (const tier of REWARD_TIERS) {
+    if (level <= tier.maxRank) return tier.reward;
+  }
+  return MAX_TIER_REWARD;
 }
 
 function validNumber(value) {
