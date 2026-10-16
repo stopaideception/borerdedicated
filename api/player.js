@@ -129,47 +129,56 @@ module.exports = async function handler(req, res) {
     }
 
     // GET — загрузка и проверка времени
-    if (req.method === "GET") {
-      const now = Date.now();
+  
+if (req.method === "GET") {
+  const refSnapshot = await ref.get();
+  const currentPlayer = refSnapshot.val();
 
-      const result = await ref.transaction(current => {
-        if (!current) return;
+  if (!currentPlayer) {
+    return res.status(404).json({
+      error: "Player not found"
+    });
+  }
 
-        const player = { ...current };
+  const now = Date.now();
 
-        if (
-          player.userScore === 0 &&
-          typeof player.nextRewardAt === "number" &&
-          now >= player.nextRewardAt
-        ) {
-          const reward = rewardForLevel(player.level);
+  if (
+    currentPlayer.userScore === 0 &&
+    typeof currentPlayer.nextRewardAt === "number" &&
+    now >= currentPlayer.nextRewardAt
+  ) {
+    await ref.transaction(current => {
+      if (!current) return;
 
-          if (reward !== null) {
-            player.userScore = reward;
-            player.nextRewardAt = null;
-            return player;
-          }
-        }
-
-        // Нет изменений — транзакцию не записываем
-        // Возвращаем данные игрока
-      return player;
-      }, undefined, false);
-
-      const player = (await ref.get()).val();
-
-      if (!player) {
-        return res.status(404).json({
-          error: "Player not found"
-        });
+      if (
+        current.userScore !== 0 ||
+        typeof current.nextRewardAt !== "number" ||
+        Date.now() < current.nextRewardAt
+      ) {
+        return;
       }
 
-      return res.status(200).json({
-        success: true,
-        playerId,
-        ...player
-      });
-    }
+      const reward = rewardForLevel(current.level);
+
+      if (reward === null) return;
+
+      return {
+        ...current,
+        userScore: reward,
+        nextRewardAt: null
+      };
+    }, undefined, false);
+  }
+
+  const player = (await ref.get()).val();
+
+  return res.status(200).json({
+    success: true,
+    playerId,
+    ...player
+  });
+}
+
   } catch (error) {
     console.error("Player API error:", error);
 
