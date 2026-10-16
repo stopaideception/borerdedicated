@@ -121,6 +121,11 @@ module.exports = async function handler(req, res) {
         return updated;
       }, undefined, false);
 
+      console.log("TRANSACTION DEBUG", {
+  committed: result.committed,
+  snapshot: result.snapshot.val()
+});
+
       return res.status(200).json({
         success: true,
         playerId,
