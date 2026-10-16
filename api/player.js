@@ -1,10 +1,10 @@
 
-const { getDatabase } = require("firebase-admin/database");
 const { getApps, initializeApp, cert } = require("firebase-admin/app");
 
 const THREE_HOURS = 3 * 60 * 60 * 1000;
+const MAX_RETRIES = 10;
 
-function database() {
+function firebaseApp() {
   if (!getApps().length) {
     initializeApp({
       credential: cert({
@@ -16,17 +16,116 @@ function database() {
     });
   }
 
-  return getDatabase();
+  return getApps()[0];
 }
 
 function rewardForLevel(level) {
-  if (level < 4) return 70;
+  if (level < 4) return 50;
   if (level < 8) return 70;
   return null;
 }
 
 function validNumber(value) {
   return Number.isSafeInteger(value) && value >= 0;
+}
+
+function defaultPlayer() {
+  return {
+    level: 0,
+    loss: 0,
+    totalWin: 0,
+    userScore: 50,
+    win: 0,
+    winRow: 0
+  };
+}
+
+async function firebaseRequest(playerId, method, data, etag) {
+  const app = firebaseApp();
+  const token = await app.options.credential.getAccessToken();
+
+  const baseUrl = process.env.FIREBASE_DATABASE_URL.replace(/\/+$/, "");
+  const url = `${baseUrl}/players/${encodeURIComponent(playerId)}.json`;
+
+  const headers = {
+    Authorization: `Bearer ${token.access_token}`
+  };
+
+  if (method === "GET") {
+    headers["X-Firebase-ETag"] = "true";
+  }
+
+  if (method === "PUT") {
+    headers["Content-Type"] = "application/json";
+    headers["if-match"] = etag;
+  }
+
+  const response = await fetch(url, {
+    method,
+    headers,
+    ...(method === "PUT"
+      ? { body: JSON.stringify(data) }
+      : {})
+  });
+
+  if (response.status === 412) {
+    return { conflict: true };
+  }
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(
+      `Firebase HTTP ${response.status}: ${message}`
+    );
+  }
+
+  return {
+    conflict: false,
+    data: await response.json(),
+    etag: response.headers.get("etag")
+  };
+}
+
+async function atomicUpdate(playerId, updater) {
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const current = await firebaseRequest(
+      playerId,
+      "GET"
+    );
+
+    if (!current.etag) {
+      throw new Error("Firebase did not return ETag");
+    }
+
+    const decision = updater(current.data);
+
+    if (!decision.write) {
+      return {
+        committed: false,
+        reason: decision.reason,
+        player: current.data
+      };
+    }
+
+    const saved = await firebaseRequest(
+      playerId,
+      "PUT",
+      decision.player,
+      current.etag
+    );
+
+    if (saved.conflict) {
+      continue;
+    }
+
+    return {
+      committed: true,
+      reason: decision.reason,
+      player: saved.data
+    };
+  }
+
+  throw new Error("Too many concurrent updates");
 }
 
 module.exports = async function handler(req, res) {
@@ -38,11 +137,9 @@ module.exports = async function handler(req, res) {
     });
   }
 
-  const key = req.headers["x-api-key"];
-
   if (
     !process.env.SERVER_API_KEY ||
-    key !== process.env.SERVER_API_KEY
+    req.headers["x-api-key"] !== process.env.SERVER_API_KEY
   ) {
     return res.status(401).json({
       error: "Unauthorized"
@@ -64,9 +161,10 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    const ref = database().ref(`players/${playerId}`);
+    // ====================================
+    // PATCH — СОХРАНЕНИЕ ДАННЫХ
+    // ====================================
 
-    // PATCH — сохранение данных
     if (req.method === "PATCH") {
       const body = req.body;
 
@@ -111,137 +209,118 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      const now = Date.now();
+      const result = await atomicUpdate(
+        playerId,
+        current => {
+          const player = current || defaultPlayer();
+          const oldScore = player.userScore;
 
-      const result = await ref.transaction(current => {
-        const player = current || {
-          level: 0,
-          loss: 0,
-          totalWin: 0,
-          userScore: 50,
-          win: 0,
-          winRow: 0
-        };
+          const updated = {
+            ...player,
+            ...changes
+          };
 
-        const oldScore = player.userScore;
-
-        const updated = {
-          ...player,
-          ...changes
-        };
-
-        if (updated.userScore === 0) {
-          if (
-            oldScore !== 0 ||
-            updated.nextRewardAt == null
-          ) {
-            updated.nextRewardAt =
-              now + THREE_HOURS;
+          if (updated.userScore === 0) {
+            if (
+              oldScore !== 0 ||
+              updated.nextRewardAt == null
+            ) {
+              updated.nextRewardAt =
+                Date.now() + THREE_HOURS;
+            }
+          } else {
+            updated.nextRewardAt = null;
           }
-        } else {
-          updated.nextRewardAt = null;
-        }
 
-        return updated;
-      }, undefined, false);
+          return {
+            write: true,
+            reason: "saved",
+            player: updated
+          };
+        }
+      );
 
       return res.status(200).json({
         success: true,
         playerId,
-        ...result.snapshot.val()
+        ...result.player
       });
     }
 
-    // GET — загрузка и проверка награды
+    // ====================================
+    // GET — ЗАГРУЗКА И НАГРАДА
+    // ====================================
+
     if (req.method === "GET") {
-      const snapshot = await ref.get();
-      const currentPlayer = snapshot.val();
-
-      if (!currentPlayer) {
-        return res.status(404).json({
-          error: "Player not found"
-        });
-      }
-
-      const now = Date.now();
-
-      const rewardDue =
-        currentPlayer.userScore === 0 &&
-        typeof currentPlayer.nextRewardAt === "number" &&
-        now >= currentPlayer.nextRewardAt &&
-        rewardForLevel(currentPlayer.level) !== null;
-
-      if (rewardDue) {
-        let transactionReason = "not_started";
-        let transactionCurrent = null;
-
-        const result = await ref.transaction(current => {
-          transactionCurrent = current;
-
-          if (!current) {
-            transactionReason = "current_empty";
-            return;
+      const result = await atomicUpdate(
+        playerId,
+        current => {
+          if (current === null) {
+            return {
+              write: false,
+              reason: "player_not_found"
+            };
           }
 
           if (current.userScore !== 0) {
-            transactionReason = "score_not_zero";
-            return;
+            return {
+              write: false,
+              reason: "score_not_zero"
+            };
           }
 
           if (
             typeof current.nextRewardAt !== "number"
           ) {
-            transactionReason = "time_not_number";
-            return;
+            return {
+              write: false,
+              reason: "no_reward_time"
+            };
           }
 
           if (Date.now() < current.nextRewardAt) {
-            transactionReason = "time_not_reached";
-            return;
+            return {
+              write: false,
+              reason: "waiting"
+            };
           }
 
           const reward = rewardForLevel(current.level);
 
           if (reward === null) {
-            transactionReason = "no_reward_for_level";
-            return;
+            return {
+              write: false,
+              reason: "no_reward_for_level"
+            };
           }
 
-          transactionReason = "reward_applied";
-
           return {
-            ...current,
-            userScore: reward,
-            nextRewardAt: null
+            write: true,
+            reason: "reward_applied",
+            player: {
+              ...current,
+              userScore: reward,
+              nextRewardAt: null
+            }
           };
-        }, undefined, false);
-
-        const player = (await ref.get()).val();
-
-        if (!result.committed) {
-          return res.status(200).json({
-            success: true,
-            playerId,
-            rewardTransactionCommitted: false,
-            transactionReason,
-            transactionCurrent,
-            ...player
-          });
         }
+      );
 
-        return res.status(200).json({
-          success: true,
-          playerId,
-          ...player
+      if (result.player === null) {
+        return res.status(404).json({
+          error: "Player not found"
         });
       }
 
       return res.status(200).json({
         success: true,
         playerId,
-        ...currentPlayer
+        rewardTransactionCommitted: result.committed,
+        transactionReason: result.reason,
+        ...result.player
       });
     }
+
   } catch (error) {
     console.error("Player API error:", error);
 
