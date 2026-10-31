@@ -1,6 +1,6 @@
 const { getApps, initializeApp, cert } = require("firebase-admin/app");
 
-const THREE_HOURS = 3 * 60 * 60 * 1000;
+const HOUR = 60 * 60 * 1000;
 const MAX_RETRIES = 10;
 
 function firebaseApp() {
@@ -21,17 +21,34 @@ const REWARD_TIERS = [
   { maxRank: 4,  reward: 50  },
   { maxRank: 9,  reward: 70  },
   { maxRank: 14, reward: 100 },
-  { maxRank: 19, reward: 150 },
-  { maxRank: 24, reward: 200 },
-  { maxRank: 29, reward: 250 }
+  { maxRank: 19, reward: 120 },
+  { maxRank: 24, reward: 140 },
+  { maxRank: 29, reward: 160 }
 ];
-const MAX_TIER_REWARD = 250;
+const MAX_TIER_REWARD = 160;
 
 function rewardForLevel(level) {
   for (const tier of REWARD_TIERS) {
     if (level <= tier.maxRank) return tier.reward;
   }
   return MAX_TIER_REWARD;
+}
+
+const WAIT_TIERS = [
+  { maxRank: 4,  wait: 3 * HOUR },
+  { maxRank: 9,  wait: 3 * HOUR },
+  { maxRank: 14, wait: 4 * HOUR },
+  { maxRank: 19, wait: 4 * HOUR },
+  { maxRank: 24, wait: 6 * HOUR },
+  { maxRank: 29, wait: 6 * HOUR }
+];
+const MAX_WAIT = 6 * HOUR;
+
+function waitForLevel(level) {
+  for (const tier of WAIT_TIERS) {
+    if (level <= tier.maxRank) return tier.wait;
+  }
+  return MAX_WAIT;
 }
 
 // Любые имена полей из Blueprint: "User Score", "UserScore", "userScore",
@@ -227,7 +244,7 @@ module.exports = async function handler(req, res) {
 
         if (updated.userScore === 0) {
           if (oldScore !== 0 || updated.nextRewardAt == null) {
-            updated.nextRewardAt = Date.now() + THREE_HOURS;
+            updated.nextRewardAt = Date.now() + waitForLevel(updated.level);
           }
         } else {
           updated.nextRewardAt = null;
