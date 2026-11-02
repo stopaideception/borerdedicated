@@ -35,14 +35,10 @@ function rewardForLevel(level) {
 }
 
 const WAIT_TIERS = [
-  { maxRank: 4,  wait: 3 * HOUR },
-  { maxRank: 9,  wait: 3 * HOUR },
-  { maxRank: 14, wait: 4 * HOUR },
-  { maxRank: 19, wait: 4 * HOUR },
-  { maxRank: 24, wait: 6 * HOUR },
-  { maxRank: 29, wait: 6 * HOUR }
+  { maxRank: 14, wait: 3 * HOUR },
+  { maxRank: 29, wait: 4 * HOUR }
 ];
-const MAX_WAIT = 6 * HOUR;
+const MAX_WAIT = 5 * HOUR;
 
 function waitForLevel(level) {
   for (const tier of WAIT_TIERS) {
